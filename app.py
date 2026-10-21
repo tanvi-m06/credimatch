@@ -5,19 +5,22 @@ CrediMatch AI - Consumer Credit Card Recommendation Website
 A clean, premium, minimalist consumer fintech platform that matches everyday
 users to optimal credit cards based on spending habits, lifestyle, and rewards.
 
-Visual Palette:
-  - Main Background: Warm off-white (#FAF9F6)
-  - Cards & Content: Pure white (#FFFFFF)
-  - Secondary Panels: Soft beige (#F0E8DF)
-  - Primary Accent: Deep maroon (#702D3D)
-  - Hover Accent: Muted burgundy (#8B4556)
-  - Text: Dark charcoal (#292524)
-  - Secondary Text: Warm grey (#78716C)
-  - Borders: Subtle beige-grey (#E7DED5)
+Key Principles:
+  - All profile inputs start at zero (no prefilled assumptions or sample users).
+  - No recommendations or spending personas generated until user submits profile.
+  - Friendly validation: requires meaningful spending (> 0); handles zero category spends cleanly.
+  - Stale detection: editing inputs marks recommendations as needing recalculation.
+  - Soft beige (#F0E8DF) and deep maroon (#702D3D) minimalist fintech aesthetic.
 ================================================================================
 """
 
+import sys
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -201,34 +204,54 @@ def load_models_quietly():
 risk_model, risk_imputer, cards_df = load_models_quietly()
 
 # ------------------------------------------------------------------------------
-# SESSION STATE INITIALIZATION
+# SESSION STATE INITIALIZATION (All Profile Inputs Start at Zero)
 # ------------------------------------------------------------------------------
 if "current_page" not in st.session_state:
     st.session_state.current_page = "Home"
 
-# Profile defaults (simple, consumer-relevant)
-if "monthly_income" not in st.session_state:
-    st.session_state.monthly_income = 65000  # ₹65,000 / month
-if "age" not in st.session_state:
-    st.session_state.age = 30
+def navigate_to(page_name):
+    """Reliably navigates between views."""
+    st.session_state.current_page = page_name
 
-# Monthly spending categories (₹)
+# Recommendation & Profile Submission Flags
+if "recommendations_generated" not in st.session_state:
+    st.session_state.recommendations_generated = False
+
+if "submitted_profile" not in st.session_state:
+    st.session_state.submitted_profile = None
+
+if "stored_recommendations" not in st.session_state:
+    st.session_state.stored_recommendations = []
+
+if "stored_persona" not in st.session_state:
+    st.session_state.stored_persona = None
+
+if "stored_spending" not in st.session_state:
+    st.session_state.stored_spending = None
+
+# Numeric profile fields start at zero
+if "monthly_income" not in st.session_state:
+    st.session_state.monthly_income = 0
+if "age" not in st.session_state:
+    st.session_state.age = 0
+
+# Monthly spending categories start at zero
 if "m_groceries" not in st.session_state:
-    st.session_state.m_groceries = 6000
+    st.session_state.m_groceries = 0
 if "m_dining" not in st.session_state:
-    st.session_state.m_dining = 5000
+    st.session_state.m_dining = 0
 if "m_travel" not in st.session_state:
-    st.session_state.m_travel = 4000
+    st.session_state.m_travel = 0
 if "m_online" not in st.session_state:
-    st.session_state.m_online = 7000
+    st.session_state.m_online = 0
 if "m_fuel" not in st.session_state:
-    st.session_state.m_fuel = 2500
+    st.session_state.m_fuel = 0
 if "m_entertainment" not in st.session_state:
-    st.session_state.m_entertainment = 1500
+    st.session_state.m_entertainment = 0
 if "dom_lounge" not in st.session_state:
-    st.session_state.dom_lounge = 4
+    st.session_state.dom_lounge = 0
 if "intl_lounge" not in st.session_state:
-    st.session_state.intl_lounge = 1
+    st.session_state.intl_lounge = 0
 
 # ------------------------------------------------------------------------------
 # SIMPLIFIED NAVIGATION (Only 4 Items)
@@ -251,28 +274,31 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-def on_nav_select():
-    st.session_state.current_page = st.session_state.nav_radio
-
 curr_page_idx = NAV_ITEMS.index(st.session_state.current_page) if st.session_state.current_page in NAV_ITEMS else 0
-st.sidebar.radio(
+selected_page = st.sidebar.radio(
     "Navigation Menu",
     NAV_ITEMS,
     index=curr_page_idx,
-    key="nav_radio",
-    on_change=on_nav_select,
     label_visibility="collapsed"
 )
+if selected_page != st.session_state.current_page:
+    st.session_state.current_page = selected_page
+    st.rerun()
 
 # ------------------------------------------------------------------------------
-# INTERNAL REVENUE & CARD MATCHING HELPER
+# INFERENCE PIPELINE HELPER (Triggered only upon explicit user submission)
 # ------------------------------------------------------------------------------
-def compute_card_matches():
-    """Computes personalized recommendations based on profile and spending."""
-    annual_inc = float(st.session_state.monthly_income * 12)
-    req_lim = min(annual_inc * 0.35, 300000.0)
+def compute_card_matches_for_submission(income_val, age_val, groc, din, trav, onl, fuel, ent, dom_l, intl_l):
+    """Executes backend models and generates recommendations for valid submitted inputs."""
+    tot_annual_spend = float((groc + din + trav + onl + fuel + ent) * 12)
+    # If income is 0, estimate conservatively based on spending, or minimum baseline
+    annual_inc = float(income_val * 12) if income_val > 0 else max(tot_annual_spend * 2.0, 300000.0)
+    req_lim = max(25000.0, min(annual_inc * 0.35, 300000.0))
+    annuity_est = req_lim * 0.12
+    dti = round(req_lim / max(1000.0, annual_inc), 3) if annual_inc > 0 else 0.0
+    ati = round(annuity_est / max(1000.0, annual_inc), 3) if annual_inc > 0 else 0.0
     
-    # Internal risk scoring quietly assigns suitability tier without showing raw probability to user
+    # Internal risk scoring provides suitability tier without exposing raw model details
     feature_cols = [
         'AMT_INCOME_TOTAL', 'AMT_CREDIT', 'AMT_ANNUITY', 'AGE_YEARS', 'YEARS_EMPLOYED',
         'CNT_CHILDREN', 'DEBT_TO_INCOME', 'ANNUITY_TO_INCOME',
@@ -281,16 +307,17 @@ def compute_card_matches():
     row_dict = {
         'AMT_INCOME_TOTAL': annual_inc,
         'AMT_CREDIT': req_lim,
-        'AMT_ANNUITY': req_lim * 0.12,
-        'AGE_YEARS': float(st.session_state.age),
+        'AMT_ANNUITY': annuity_est,
+        'AGE_YEARS': float(age_val) if age_val >= 18 else 30.0,
         'YEARS_EMPLOYED': 4.0,
         'CNT_CHILDREN': 0,
-        'DEBT_TO_INCOME': round(req_lim / max(1000.0, annual_inc), 3),
-        'ANNUITY_TO_INCOME': round((req_lim * 0.12) / max(1000.0, annual_inc), 3),
+        'DEBT_TO_INCOME': dti,
+        'ANNUITY_TO_INCOME': ati,
         'EXT_SOURCE_1': 0.68,
         'EXT_SOURCE_2': 0.72,
         'EXT_SOURCE_3': 0.70
     }
+    
     df_app = pd.DataFrame([row_dict], columns=feature_cols)
     df_imp = pd.DataFrame(risk_imputer.transform(df_app), columns=feature_cols)
     pd_prob = float(risk_model.predict_proba(df_imp)[0, 1])
@@ -308,14 +335,14 @@ def compute_card_matches():
     }
     
     spend_profile = {
-        'groceries': float(st.session_state.m_groceries * 12),
-        'dining': float(st.session_state.m_dining * 12),
-        'travel': float(st.session_state.m_travel * 12),
-        'online_shopping': float(st.session_state.m_online * 12),
-        'fuel': float(st.session_state.m_fuel * 12),
-        'entertainment': float(st.session_state.m_entertainment * 12),
-        'domestic_lounge_visits': int(st.session_state.dom_lounge),
-        'intl_lounge_visits': int(st.session_state.intl_lounge)
+        'groceries': float(groc * 12),
+        'dining': float(din * 12),
+        'travel': float(trav * 12),
+        'online_shopping': float(onl * 12),
+        'fuel': float(fuel * 12),
+        'entertainment': float(ent * 12),
+        'domestic_lounge_visits': int(dom_l),
+        'intl_lounge_visits': int(intl_l)
     }
     
     cluster_info = predict_spending_cluster(spend_profile)
@@ -328,7 +355,23 @@ def compute_card_matches():
     )
     return cluster_info, spend_profile, top_cards
 
-current_persona, current_spend, top_recommendations = compute_card_matches()
+# Helper to check if current inputs differ from last submitted profile
+def is_profile_modified_since_submission():
+    if st.session_state.submitted_profile is None:
+        return False
+    current_tuple = (
+        st.session_state.monthly_income,
+        st.session_state.age,
+        st.session_state.m_groceries,
+        st.session_state.m_dining,
+        st.session_state.m_travel,
+        st.session_state.m_online,
+        st.session_state.m_fuel,
+        st.session_state.m_entertainment,
+        st.session_state.dom_lounge,
+        st.session_state.intl_lounge
+    )
+    return current_tuple != st.session_state.submitted_profile
 
 # ==============================================================================
 # 1. HOME PAGE
@@ -345,12 +388,15 @@ if st.session_state.current_page == "Home":
     """, unsafe_allow_html=True)
     
     if st.button("Find My Cards", type="primary"):
-        st.session_state.current_page = "Find My Cards"
+        # If user hasn't completed their profile yet, guide them directly to My Profile
+        if not st.session_state.recommendations_generated:
+            navigate_to("My Profile")
+        else:
+            navigate_to("Find My Cards")
         st.rerun()
         
     st.markdown("<div style='height: 3rem;'></div>", unsafe_allow_html=True)
     
-    # Exactly three compact feature highlights
     col1, col2, col3 = st.columns(3, gap="medium")
     with col1:
         st.markdown("""
@@ -386,213 +432,350 @@ if st.session_state.current_page == "Home":
         """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 2. MY PROFILE
+# 2. MY PROFILE (All Fields Start at 0 by Default)
 # ==============================================================================
 elif st.session_state.current_page == "My Profile":
     st.markdown("## My Profile")
     st.markdown("<p style='color: #78716C; margin-bottom: 1.5rem;'>Tell us a little about your income and typical monthly spending to tailor your card recommendations.</p>", unsafe_allow_html=True)
     
+    # Notify user if they edited their inputs after recommendations were already generated
+    if st.session_state.recommendations_generated and is_profile_modified_since_submission():
+        st.info("💡 **Profile modified:** You've made changes to your profile details. Click **Find My Cards** below to recalculate recommendations.")
+    
     col_p1, col_p2 = st.columns([1, 1], gap="large")
     
     with col_p1:
         st.markdown("### About You")
-        new_inc = st.number_input(
+        inp_income = st.number_input(
             "Monthly Take-Home Income (₹)",
-            min_value=15000,
-            max_value=1500000,
+            min_value=0,
+            max_value=2000000,
             value=st.session_state.monthly_income,
-            step=5000
+            step=5000,
+            help="Your net take-home monthly income in Indian Rupees."
         )
-        st.session_state.monthly_income = new_inc
-        st.caption(f"Estimated Annual Income: **₹{new_inc * 12:,.0f}**")
-        
-        st.session_state.age = st.slider(
+        if inp_income > 0:
+            st.caption(f"Estimated Annual Income: **₹{inp_income * 12:,.0f}**")
+        else:
+            st.caption("Optional: enter your typical monthly income for enhanced card gating.")
+            
+        inp_age = st.number_input(
             "Age (Years)",
-            min_value=21,
-            max_value=65,
-            value=st.session_state.age
+            min_value=0,
+            max_value=100,
+            value=st.session_state.age,
+            step=1,
+            help="Applicant age in years."
         )
-        
+        if inp_age == 0:
+            st.caption("Optional: enter your age (minimum 18 years for card applications).")
+            
         st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
         st.markdown("#### Travel & Airport Lounges")
         st.caption("How many times do you visit airport lounges in a year?")
         cl1, cl2 = st.columns(2)
         with cl1:
-            st.session_state.dom_lounge = st.number_input("Domestic Lounges / Year", 0, 24, st.session_state.dom_lounge)
+            inp_dom = st.number_input("Domestic Lounges / Year", min_value=0, max_value=50, value=st.session_state.dom_lounge, step=1)
         with cl2:
-            st.session_state.intl_lounge = st.number_input("Intl Lounges / Year", 0, 12, st.session_state.intl_lounge)
+            inp_intl = st.number_input("Intl Lounges / Year", min_value=0, max_value=50, value=st.session_state.intl_lounge, step=1)
 
     with col_p2:
         st.markdown("### Monthly Spending")
         st.markdown("<div class='beige-panel'>", unsafe_allow_html=True)
         st.caption("Enter your average monthly spending in ₹ across these categories:")
         
-        st.session_state.m_groceries = st.number_input("Groceries & Supermarkets (₹)", 0, 100000, st.session_state.m_groceries, step=1000)
-        st.session_state.m_dining = st.number_input("Dining & Food Delivery (₹)", 0, 100000, st.session_state.m_dining, step=1000)
-        st.session_state.m_travel = st.number_input("Travel, Hotels & Flights (₹)", 0, 200000, st.session_state.m_travel, step=1000)
-        st.session_state.m_online = st.number_input("Online Shopping (₹)", 0, 150000, st.session_state.m_online, step=1000)
-        st.session_state.m_fuel = st.number_input("Fuel & Commuting (₹)", 0, 50000, st.session_state.m_fuel, step=500)
-        st.session_state.m_entertainment = st.number_input("Entertainment & Movies (₹)", 0, 50000, st.session_state.m_entertainment, step=500)
+        inp_groc = st.number_input("Groceries & Supermarkets (₹)", min_value=0, max_value=500000, value=st.session_state.m_groceries, step=500)
+        inp_din = st.number_input("Dining & Food Delivery (₹)", min_value=0, max_value=500000, value=st.session_state.m_dining, step=500)
+        inp_trav = st.number_input("Travel, Hotels & Flights (₹)", min_value=0, max_value=500000, value=st.session_state.m_travel, step=500)
+        inp_onl = st.number_input("Online Shopping (₹)", min_value=0, max_value=500000, value=st.session_state.m_online, step=500)
+        inp_fuel = st.number_input("Fuel & Commuting (₹)", min_value=0, max_value=500000, value=st.session_state.m_fuel, step=500)
+        inp_ent = st.number_input("Entertainment & Movies (₹)", min_value=0, max_value=500000, value=st.session_state.m_entertainment, step=500)
         
-        m_tot = (st.session_state.m_groceries + st.session_state.m_dining + st.session_state.m_travel + 
-                 st.session_state.m_online + st.session_state.m_fuel + st.session_state.m_entertainment)
-        st.markdown(f"<div style='margin-top: 12px; font-weight: 600; color: #702D3D;'>Total Monthly Card Spend: ₹{m_tot:,.0f} (₹{m_tot*12:,.0f} / year)</div>", unsafe_allow_html=True)
+        total_monthly_spend = inp_groc + inp_din + inp_trav + inp_onl + inp_fuel + inp_ent
+        st.markdown(f"<div style='margin-top: 12px; font-weight: 600; color: #702D3D;'>Total Monthly Card Spend: ₹{total_monthly_spend:,.0f} (₹{total_monthly_spend * 12:,.0f} / year)</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         
     st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
+    
+    # Keep current inputs stored in session state for persistence
+    st.session_state.monthly_income = inp_income
+    st.session_state.age = inp_age
+    st.session_state.m_groceries = inp_groc
+    st.session_state.m_dining = inp_din
+    st.session_state.m_travel = inp_trav
+    st.session_state.m_online = inp_onl
+    st.session_state.m_fuel = inp_fuel
+    st.session_state.m_entertainment = inp_ent
+    st.session_state.dom_lounge = inp_dom
+    st.session_state.intl_lounge = inp_intl
+    
+    # Primary Submission Button
     if st.button("Find My Cards", type="primary"):
-        st.session_state.current_page = "Find My Cards"
-        st.rerun()
+        # Validation checks
+        has_error = False
+        if total_monthly_spend <= 0:
+            st.error("Please enter your estimated monthly spending in at least one category to discover tailored card recommendations.")
+            has_error = True
+        elif inp_age > 0 and inp_age < 18:
+            st.error("Card applicants must be at least 18 years of age.")
+            has_error = True
+            
+        if not has_error:
+            # Execute recommendation pipeline using submitted values
+            with st.spinner("Finding your best card matches..."):
+                c_info, s_prof, t_cards = compute_card_matches_for_submission(
+                    inp_income, inp_age,
+                    inp_groc, inp_din, inp_trav, inp_onl, inp_fuel, inp_ent,
+                    inp_dom, inp_intl
+                )
+                st.session_state.stored_persona = c_info
+                st.session_state.stored_spending = s_prof
+                st.session_state.stored_recommendations = t_cards
+                st.session_state.recommendations_generated = True
+                st.session_state.submitted_profile = (
+                    inp_income, inp_age, inp_groc, inp_din, inp_trav,
+                    inp_onl, inp_fuel, inp_ent, inp_dom, inp_intl
+                )
+                
+            navigate_to("Find My Cards")
+            st.rerun()
 
 # ==============================================================================
-# 3. FIND MY CARDS (The Primary Feature)
+# 3. FIND MY CARDS (Primary Feature - Empty until user submits profile)
 # ==============================================================================
 elif st.session_state.current_page == "Find My Cards":
     st.markdown("## Your Best Card Matches")
-    st.markdown("<p style='color: #78716C; margin-bottom: 0.5rem;'>Here are the top three credit cards ranked for your spending patterns and lifestyle preferences.</p>", unsafe_allow_html=True)
     
-    st.markdown(f"""
-    <div style="margin-bottom: 1.5rem;">
-        <span class="persona-badge">{current_persona['icon']} Lifestyle Persona: {current_persona['persona_name']}</span>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Top 3 Card Recommendations
-    for rank, card in enumerate(top_recommendations, 1):
-        nav_val = card['net_annual_value_inr']
-        card_class = "top-match-card" if rank == 1 else "product-card"
-        badge_label = "Top Match" if rank == 1 else f"Match #{rank}"
+    # Check if recommendations have been generated
+    if not st.session_state.recommendations_generated or not st.session_state.stored_recommendations:
+        st.markdown("<p style='color: #78716C; margin-bottom: 2rem;'>Discover which credit cards match your individual spending patterns and lifestyle.</p>", unsafe_allow_html=True)
         
-        st.markdown(f"""
-        <div class="{card_class}">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                <div>
-                    <span class="maroon-pill">{badge_label}</span>
-                    <h3 style="margin: 4px 0 2px 0; color: #292524;">{card['card_name']}</h3>
-                    <p style="margin: 0; color: #78716C; font-size: 0.9rem;">Issued by <strong>{card['issuing_bank']}</strong></p>
-                </div>
-                <div style="text-align: right;">
-                    <span style="font-size: 0.8rem; color: #78716C; text-transform: uppercase; letter-spacing: 0.05em;">Estimated Net Value</span>
-                    <div class="nav-figure">₹{nav_val:,.0f} <span style="font-size: 0.95rem; font-weight: 500; color: #78716C;">/ year</span></div>
-                    <span style="font-size: 0.85rem; color: #78716C;">Annual Fee: <strong>{card['fee_display']}</strong></span>
-                </div>
-            </div>
-            <div style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed #E7DED5;">
-                <p style="margin: 0 0 6px 0; font-weight: 600; font-size: 0.88rem; color: #44403C;">Why this card fits your spending:</p>
-                <ul style="margin: 0; padding-left: 20px; font-size: 0.88rem; color: #57534E; line-height: 1.5;">
-                    {''.join([f'<li>{reason}</li>' for reason in card['reasons']])}
-                </ul>
-            </div>
+        # Friendly empty-state panel exactly as requested
+        st.markdown("""
+        <div class="product-card" style="text-align: center; padding: 45px 25px;">
+            <div style="font-size: 2.6rem; margin-bottom: 14px;">💳</div>
+            <h3 style="margin: 0 0 8px 0; color: #292524;">Your personalised matches will appear here.</h3>
+            <p style="color: #78716C; font-size: 1.05rem; max-width: 520px; margin: 0 auto 22px auto; line-height: 1.5;">
+                Enter your profile and monthly spending details to discover which cards may suit your lifestyle.
+            </p>
         </div>
         """, unsafe_allow_html=True)
         
-        with st.expander(f"View Benefits & Details for {card['card_name']}"):
-            b1, b2, b3 = st.columns(3)
-            with b1:
-                st.markdown("**Estimated Category Rewards**")
-                for cat, amt in card['category_rewards_inr'].items():
-                    st.write(f"- {cat.replace('_', ' ').title()}: `₹{amt:,.0f}`")
-                st.write(f"**Total Annual Rewards:** `₹{card['capped_rewards_inr']:,.0f}`")
-            with b2:
-                st.markdown("**Perks & Welcome Benefits**")
-                st.write(f"- Lounge Benefit Value: `₹{card['lounge_benefit_value_inr']:,.0f}`")
-                st.write(f"- Welcome Bonus: `₹{card['welcome_bonus_value']:,.0f}`")
-                st.write(f"- Key Perks: _{card['key_perks']}_")
-            with b3:
-                st.markdown("**Annual Fee & Net Calculation**")
-                st.write(f"- Standard Annual Fee: `₹{card['annual_fee']:,.0f}`")
-                st.write(f"- Net Payable Fee: `₹{card['net_fee_inr']:,.0f}`")
-                st.write(f"- **Final Net Annual Value:** `₹{card['net_annual_value_inr']:,.0f}`")
-                st.caption(f"Cap policy: {card['caps_notes']}")
+        if st.button("Complete My Profile", type="primary"):
+            navigate_to("My Profile")
+            st.rerun()
+            
+    else:
+        # Check if the user modified their profile inputs after recommendations were computed
+        if is_profile_modified_since_submission():
+            st.warning("⚠️ **Profile modified:** Your profile spending details have changed since recommendations were last generated. Click **Find My Cards** below to recalculate recommendations.")
+            
+            if st.button("Find My Cards (Recalculate)", type="primary", key="btn_recalc_top"):
+                curr_tot_spend = (
+                    st.session_state.m_groceries + st.session_state.m_dining +
+                    st.session_state.m_travel + st.session_state.m_online +
+                    st.session_state.m_fuel + st.session_state.m_entertainment
+                )
+                if curr_tot_spend <= 0:
+                    st.error("Please enter your estimated monthly spending in at least one category to discover tailored card recommendations.")
+                elif st.session_state.age > 0 and st.session_state.age < 18:
+                    st.error("Card applicants must be at least 18 years of age.")
+                else:
+                    with st.spinner("Recalculating your card matches..."):
+                        c_info, s_prof, t_cards = compute_card_matches_for_submission(
+                            st.session_state.monthly_income, st.session_state.age,
+                            st.session_state.m_groceries, st.session_state.m_dining,
+                            st.session_state.m_travel, st.session_state.m_online,
+                            st.session_state.m_fuel, st.session_state.m_entertainment,
+                            st.session_state.dom_lounge, st.session_state.intl_lounge
+                        )
+                        st.session_state.stored_persona = c_info
+                        st.session_state.stored_spending = s_prof
+                        st.session_state.stored_recommendations = t_cards
+                        st.session_state.recommendations_generated = True
+                        st.session_state.submitted_profile = (
+                            st.session_state.monthly_income, st.session_state.age,
+                            st.session_state.m_groceries, st.session_state.m_dining,
+                            st.session_state.m_travel, st.session_state.m_online,
+                            st.session_state.m_fuel, st.session_state.m_entertainment,
+                            st.session_state.dom_lounge, st.session_state.intl_lounge
+                        )
+                    st.rerun()
+            st.markdown("<div style='height: 0.5rem;'></div>", unsafe_allow_html=True)
+            
+        st.markdown("<p style='color: #78716C; margin-bottom: 0.5rem;'>Here are the top three credit cards ranked for your spending patterns and lifestyle preferences.</p>", unsafe_allow_html=True)
+        
+        persona = st.session_state.stored_persona
+        recs = st.session_state.stored_recommendations
+        
+        st.markdown(f"""
+        <div style="margin-bottom: 1.5rem;">
+            <span class="persona-badge">{persona['icon']} Lifestyle Persona: {persona['persona_name']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Render Top 3 Cards
+        for rank, card in enumerate(recs, 1):
+            nav_val = card['net_annual_value_inr']
+            card_class = "top-match-card" if rank == 1 else "product-card"
+            badge_label = "Top Match" if rank == 1 else f"Match #{rank}"
+            
+            st.markdown(f"""
+            <div class="{card_class}">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                    <div>
+                        <span class="maroon-pill">{badge_label}</span>
+                        <h3 style="margin: 4px 0 2px 0; color: #292524;">{card['card_name']}</h3>
+                        <p style="margin: 0; color: #78716C; font-size: 0.9rem;">Issued by <strong>{card['issuing_bank']}</strong></p>
+                    </div>
+                    <div style="text-align: right;">
+                        <span style="font-size: 0.8rem; color: #78716C; text-transform: uppercase; letter-spacing: 0.05em;">Estimated Net Value</span>
+                        <div class="nav-figure">₹{nav_val:,.0f} <span style="font-size: 0.95rem; font-weight: 500; color: #78716C;">/ year</span></div>
+                        <span style="font-size: 0.85rem; color: #78716C;">Annual Fee: <strong>{card['fee_display']}</strong></span>
+                    </div>
+                </div>
+                <div style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed #E7DED5;">
+                    <p style="margin: 0 0 6px 0; font-weight: 600; font-size: 0.88rem; color: #44403C;">Why this card fits your spending:</p>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 0.88rem; color: #57534E; line-height: 1.5;">
+                        {''.join([f'<li>{reason}</li>' for reason in card['reasons']])}
+                    </ul>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            with st.expander(f"View Benefits & Details for {card['card_name']}"):
+                b1, b2, b3 = st.columns(3)
+                with b1:
+                    st.markdown("**Estimated Category Rewards**")
+                    for cat, amt in card['category_rewards_inr'].items():
+                        st.write(f"- {cat.replace('_', ' ').title()}: `₹{amt:,.0f}`")
+                    st.write(f"**Total Annual Rewards:** `₹{card['capped_rewards_inr']:,.0f}`")
+                with b2:
+                    st.markdown("**Perks & Welcome Benefits**")
+                    st.write(f"- Lounge Benefit Value: `₹{card['lounge_benefit_value_inr']:,.0f}`")
+                    st.write(f"- Welcome Bonus: `₹{card['welcome_bonus_value']:,.0f}`")
+                    st.write(f"- Key Perks: _{card['key_perks']}_")
+                with b3:
+                    st.markdown("**Annual Fee & Net Calculation**")
+                    st.write(f"- Standard Annual Fee: `₹{card['annual_fee']:,.0f}`")
+                    st.write(f"- Net Payable Fee: `₹{card['net_fee_inr']:,.0f}`")
+                    st.write(f"- **Final Net Annual Value:** `₹{card['net_annual_value_inr']:,.0f}`")
+                    st.caption(f"Cap policy: {card['caps_notes']}")
 
-    # Simple, compact comparison table
-    st.markdown("### Quick Comparison")
-    comp_df = pd.DataFrame([{
-        'Rank': f"#{i+1}",
-        'Card Name': c['card_name'],
-        'Bank': c['issuing_bank'],
-        'Net Annual Value': f"₹{c['net_annual_value_inr']:,.0f}",
-        'Annual Fee': c['fee_display'],
-        'Estimated Rewards': f"₹{c['capped_rewards_inr']:,.0f}",
-        'Lounge Benefit': f"₹{c['lounge_benefit_value_inr']:,.0f}"
-    } for i, c in enumerate(top_recommendations)])
-    st.dataframe(comp_df, use_container_width=True, hide_index=True)
-    
-    st.caption("Disclaimer: Estimated rewards and net values are calculated based on your input spending patterns and standard published card terms. Issuer approval terms, merchant categorization, and eligibility criteria apply.")
+        # Simple Comparison Table
+        st.markdown("### Quick Comparison")
+        comp_df = pd.DataFrame([{
+            'Rank': f"#{i+1}",
+            'Card Name': c['card_name'],
+            'Bank': c['issuing_bank'],
+            'Net Annual Value': f"₹{c['net_annual_value_inr']:,.0f}",
+            'Annual Fee': c['fee_display'],
+            'Estimated Rewards': f"₹{c['capped_rewards_inr']:,.0f}",
+            'Lounge Benefit': f"₹{c['lounge_benefit_value_inr']:,.0f}"
+        } for i, c in enumerate(recs)])
+        st.dataframe(comp_df, use_container_width=True, hide_index=True)
+        
+        st.caption("Disclaimer: Estimated rewards and net values are calculated based on your input spending patterns and standard published card terms. Issuer approval terms, merchant categorization, and eligibility criteria apply.")
 
 # ==============================================================================
-# 4. SPENDING INSIGHTS
+# 4. SPENDING INSIGHTS (Empty until user submits profile)
 # ==============================================================================
 elif st.session_state.current_page == "Spending Insights":
     st.markdown("## Spending Insights")
-    st.markdown("<p style='color: #78716C; margin-bottom: 1.5rem;'>A clear breakdown of your monthly spending and your personalized cardholder persona.</p>", unsafe_allow_html=True)
     
-    # 1. Persona Summary Card
-    st.markdown(f"""
-    <div class="product-card" style="border-left: 4px solid #702D3D;">
-        <span class="maroon-pill">Cardholder Persona</span>
-        <h3 style="margin: 4px 0 6px 0; color: #292524;">{current_persona['icon']} {current_persona['persona_name']}</h3>
-        <p style="margin: 0 0 10px 0; color: #57534E; font-size: 0.95rem; line-height: 1.5;">{current_persona['description']}</p>
-        <span style="font-size: 0.85rem; color: #78716C;">Best Reward Categories for You: <strong>{", ".join([c.replace('_', ' ').title() for c in current_persona['priority_categories']])}</strong></span>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col_chart, col_insights = st.columns([1.2, 1], gap="large")
-    
-    with col_chart:
-        spend_df = pd.DataFrame([
-            {'Category': c.replace('_', ' ').title(), 'Monthly Spend (₹)': current_spend[c] / 12}
-            for c in CATEGORIES
-        ]).sort_values('Monthly Spend (₹)', ascending=True)
+    if not st.session_state.recommendations_generated or not st.session_state.stored_spending:
+        st.markdown("<p style='color: #78716C; margin-bottom: 2rem;'>Understand your spending patterns and your assigned lifestyle persona.</p>", unsafe_allow_html=True)
         
-        fig = px.bar(
-            spend_df,
-            x='Monthly Spend (₹)',
-            y='Category',
-            orientation='h',
-            title="Monthly Spending by Category",
-            color_discrete_sequence=['#702D3D']
-        )
-        fig.update_layout(
-            paper_bgcolor='#FFFFFF',
-            plot_bgcolor='#FFFFFF',
-            font=dict(family="sans-serif", color="#292524"),
-            xaxis=dict(showgrid=True, gridcolor='#E7DED5', zeroline=False),
-            yaxis=dict(showgrid=False),
-            height=320,
-            margin=dict(l=20, r=20, t=40, b=20)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-    with col_insights:
-        st.markdown("### Spending Highlights")
-        sorted_cats = sorted(
-            [(c.replace('_', ' ').title(), current_spend[c] / 12) for c in CATEGORIES],
-            key=lambda x: x[1],
-            reverse=True
-        )
-        top_cat, top_amt = sorted_cats[0]
-        second_cat, sec_amt = sorted_cats[1]
-        m_total = sum([current_spend[c] / 12 for c in CATEGORIES])
-        top_pct = (top_amt / max(1.0, m_total)) * 100
-        
-        st.markdown(f"""
-        <div style="background-color: #FFFFFF; border: 1px solid #E7DED5; border-radius: 10px; padding: 16px; margin-bottom: 12px;">
-            <strong>1. Primary Spending Category</strong>
-            <p style="margin: 4px 0 0 0; color: #78716C; font-size: 0.9rem;">
-                <strong>{top_cat}</strong> is your largest card expense, taking up <strong>{top_pct:.1f}%</strong> (₹{top_amt:,.0f}/month) of your total monthly budget.
-            </p>
-        </div>
-        <div style="background-color: #FFFFFF; border: 1px solid #E7DED5; border-radius: 10px; padding: 16px; margin-bottom: 12px;">
-            <strong>2. High-Yield Multiplier Opportunity</strong>
-            <p style="margin: 4px 0 0 0; color: #78716C; font-size: 0.9rem;">
-                Your spending in <strong>{second_cat}</strong> (₹{sec_amt:,.0f}/month) makes you an ideal match for cards with accelerated category cashback.
-            </p>
-        </div>
-        <div style="background-color: #FFFFFF; border: 1px solid #E7DED5; border-radius: 10px; padding: 16px;">
-            <strong>3. Travel & Airport Comfort</strong>
-            <p style="margin: 4px 0 0 0; color: #78716C; font-size: 0.9rem;">
-                With {st.session_state.dom_lounge} domestic and {st.session_state.intl_lounge} international planned lounge visits, complimentary lounge access yields substantial annual savings.
+        st.markdown("""
+        <div class="product-card" style="text-align: center; padding: 45px 25px;">
+            <div style="font-size: 2.6rem; margin-bottom: 14px;">📊</div>
+            <h3 style="margin: 0 0 8px 0; color: #292524;">Your spending insights will appear here.</h3>
+            <p style="color: #78716C; font-size: 1.05rem; max-width: 520px; margin: 0 auto 22px auto; line-height: 1.5;">
+                Enter your monthly spending details in My Profile to see a visual breakdown and your cardholder persona.
             </p>
         </div>
         """, unsafe_allow_html=True)
+        
+        if st.button("Complete My Profile", type="primary"):
+            navigate_to("My Profile")
+            st.rerun()
+            
+    else:
+        # Check if modified
+        if is_profile_modified_since_submission():
+            st.warning("⚠️ **Profile modified:** Spending inputs have changed. Recalculate your recommendations on My Profile or Find My Cards to see updated insights.")
+            
+        st.markdown("<p style='color: #78716C; margin-bottom: 1.5rem;'>A clear breakdown of your monthly spending and your personalized cardholder persona.</p>", unsafe_allow_html=True)
+        
+        persona = st.session_state.stored_persona
+        spend = st.session_state.stored_spending
+        
+        # 1. Persona Summary Card
+        st.markdown(f"""
+        <div class="product-card" style="border-left: 4px solid #702D3D;">
+            <span class="maroon-pill">Cardholder Persona</span>
+            <h3 style="margin: 4px 0 6px 0; color: #292524;">{persona['icon']} {persona['persona_name']}</h3>
+            <p style="margin: 0 0 10px 0; color: #57534E; font-size: 0.95rem; line-height: 1.5;">{persona['description']}</p>
+            <span style="font-size: 0.85rem; color: #78716C;">Best Reward Categories for You: <strong>{", ".join([c.replace('_', ' ').title() for c in persona['priority_categories']])}</strong></span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col_chart, col_insights = st.columns([1.2, 1], gap="large")
+        
+        with col_chart:
+            spend_df = pd.DataFrame([
+                {'Category': c.replace('_', ' ').title(), 'Monthly Spend (₹)': spend[c] / 12}
+                for c in CATEGORIES
+            ]).sort_values('Monthly Spend (₹)', ascending=True)
+            
+            fig = px.bar(
+                spend_df,
+                x='Monthly Spend (₹)',
+                y='Category',
+                orientation='h',
+                title="Monthly Spending by Category",
+                color_discrete_sequence=['#702D3D']
+            )
+            fig.update_layout(
+                paper_bgcolor='#FFFFFF',
+                plot_bgcolor='#FFFFFF',
+                font=dict(family="sans-serif", color="#292524"),
+                xaxis=dict(showgrid=True, gridcolor='#E7DED5', zeroline=False),
+                yaxis=dict(showgrid=False),
+                height=320,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with col_insights:
+            st.markdown("### Spending Highlights")
+            sorted_cats = sorted(
+                [(c.replace('_', ' ').title(), spend[c] / 12) for c in CATEGORIES],
+                key=lambda x: x[1],
+                reverse=True
+            )
+            top_cat, top_amt = sorted_cats[0]
+            second_cat, sec_amt = sorted_cats[1]
+            m_total = sum([spend[c] / 12 for c in CATEGORIES])
+            top_pct = (top_amt / max(1.0, m_total)) * 100 if m_total > 0 else 0.0
+            
+            st.markdown(f"""
+            <div style="background-color: #FFFFFF; border: 1px solid #E7DED5; border-radius: 10px; padding: 16px; margin-bottom: 12px;">
+                <strong>1. Primary Spending Category</strong>
+                <p style="margin: 4px 0 0 0; color: #78716C; font-size: 0.9rem;">
+                    <strong>{top_cat}</strong> is your largest card expense, taking up <strong>{top_pct:.1f}%</strong> (₹{top_amt:,.0f}/month) of your monthly card spending.
+                </p>
+            </div>
+            <div style="background-color: #FFFFFF; border: 1px solid #E7DED5; border-radius: 10px; padding: 16px; margin-bottom: 12px;">
+                <strong>2. High-Yield Multiplier Opportunity</strong>
+                <p style="margin: 4px 0 0 0; color: #78716C; font-size: 0.9rem;">
+                    Your spending in <strong>{second_cat}</strong> (₹{sec_amt:,.0f}/month) makes you an ideal match for cards offering category cashback or reward multipliers.
+                </p>
+            </div>
+            <div style="background-color: #FFFFFF; border: 1px solid #E7DED5; border-radius: 10px; padding: 16px;">
+                <strong>3. Travel & Airport Comfort</strong>
+                <p style="margin: 4px 0 0 0; color: #78716C; font-size: 0.9rem;">
+                    With {st.session_state.dom_lounge} domestic and {st.session_state.intl_lounge} international lounge visits, complimentary airport lounge access yields significant travel savings.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
