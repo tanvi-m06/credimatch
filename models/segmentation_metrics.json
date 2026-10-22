@@ -1,0 +1,10 @@
+{
+    "silhouette_score": 0.654,
+    "n_clusters": 4,
+    "personas": {
+        "0": "High-Flyer / Luxury Travel",
+        "1": "Everyday Essentials & Groceries",
+        "2": "Dining & Lifestyle Enthusiast",
+        "3": "Daily Commuter & Fuel Maximizer"
+    }
+}

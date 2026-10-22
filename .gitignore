@@ -1,0 +1,22 @@
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.joblib.bak
+
+# Large raw data files (preserve locally, exclude from git repo)
+data/home_credit/*.csv
+data/home_credit/*.zip
+*.csv.gz
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
